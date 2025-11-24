@@ -3,12 +3,20 @@ const express = require("express");
 const cors = require("cors");
 const app = express();
 const port = 3000;
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
 app.use(express.json());
 app.use(cors());
+const stripe = require("stripe")(process.env.STRIPE_SECRET);
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.gs1mqwb.mongodb.net/?appName=Cluster0`;
+const crypto = require("crypto");
+function genarateTrackingId() {
+  const prefix = "";
+  const date = new Date().toISOString().slice(0, 10).replace(/-g/);
+  const random = crypto.randomBytes(3).toString("hex").toUpperCase();
+  return `${prefix}-${date}-${random}`;
+}
 
 const client = new MongoClient(uri, {
   serverApi: {
@@ -38,8 +46,59 @@ async function run() {
     });
 
     app.get("/parcels2", async (req, res) => {
-      const cursor = await parcelCollection.find().toArray();
-      res.send(cursor);
+      const query = {};
+      const { email } = req.query;
+      if (email) {
+        query.senderEmail = email;
+      }
+
+      const result = await parcelCollection.find(query).toArray();
+      res.send(result);
+    });
+
+    app.get("/parcels2/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await parcelCollection.findOne(query);
+      res.send(result);
+    });
+
+    app.delete("/parcels2/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await parcelCollection.deleteOne(query);
+      res.send(result);
+    });
+
+    // payment Info
+
+    app.post("/create-checkout-session", async (req, res) => {
+      const paymentInfo = req.body;
+      const amount = parseInt(paymentInfo.cost) * 100;
+      const session = await stripe.checkout.sessions.create({
+        line_items: [
+          {
+            // Provide the exact Price ID (e.g. price_1234) of the product you want to sell
+            price_data: {
+              currency: "usd",
+              unit_amount: amount,
+              product_data: {
+                name: `Please pay for ${paymentInfo.name}`,
+              },
+            },
+            quantity: 1,
+          },
+        ],
+        mode: "payment",
+        metadata: {
+          parcelId: paymentInfo.id,
+        },
+        customer_email: paymentInfo.email,
+        success_url: `${process.env.DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${process.env.DOMAIN}/dashboard/payment-cancel`,
+      });
+
+      res.send({ url: session.url });
     });
 
     await client.db("admin").command({ ping: 1 });
@@ -58,5 +117,5 @@ app.get("/", async (req, res) => {
 });
 
 app.listen(port, () => {
-  `This is ${port}`;
+  console.log(`This is ${port}`);
 });
