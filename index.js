@@ -32,6 +32,7 @@ async function run() {
 
     const db = client.db("Practice-zap-shift");
     const parcelCollection = db.collection("parcels2");
+    const paymentCollection = db.collection("payment");
 
     app.post("/parcels2", async (req, res) => {
       const parcel = req.body;
@@ -83,7 +84,7 @@ async function run() {
               currency: "usd",
               unit_amount: amount,
               product_data: {
-                name: `Please pay for ${paymentInfo.name}`,
+                name: `Please pay for ${paymentInfo.parcelName}`,
               },
             },
             quantity: 1,
@@ -91,14 +92,91 @@ async function run() {
         ],
         mode: "payment",
         metadata: {
-          parcelId: paymentInfo.id,
+          parcelId: paymentInfo.parcelId,
+          parcelName: paymentInfo.parcelName,
         },
-        customer_email: paymentInfo.email,
+        customer_email: paymentInfo.senderEmail,
         success_url: `${process.env.DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${process.env.DOMAIN}/dashboard/payment-cancel`,
       });
 
       res.send({ url: session.url });
+    });
+
+    // Update mal
+
+    app.patch("/payment-success", async (req, res) => {
+      const sessionId = req.query.session_id;
+      const session = await stripe.checkout.sessions.retrieve(sessionId);
+      // console.log(session);
+
+      const transactionId = session.payment_intent;
+
+      const query = { transactionId: transactionId };
+      const paymentExit = await paymentCollection.findOne(query);
+      if (paymentExit) {
+        return res.send({
+          message: "Already Use",
+          transactionId,
+          trackingId: paymentExit.trackingId,
+        });
+      }
+
+      const trackingId = genarateTrackingId();
+
+      if (session.payment_status === "paid") {
+        const id = session.metadata.parcelId;
+
+        const query = { _id: new ObjectId(id) };
+        const update = {
+          $set: {
+            paymentStatus: "paid",
+            trackingId: trackingId,
+          },
+        };
+        const result = await parcelCollection.updateOne(query, update);
+
+        // Part 4 chapter close
+
+        const payment = {
+          amount: session.amount_total / 100,
+          currency: session.currency,
+          customerEmail: session.customer_email,
+          parcelId: session.metadata.parcelId,
+          parcelName: session.metadata.parcelName,
+          transactionId: session.payment_intent,
+          paymentStatus: session.payment_status,
+          paidAt: new Date(),
+          trackingId: trackingId,
+        };
+
+        if (session.payment_status === "paid") {
+          const resultPayment = await paymentCollection.insertOne(payment);
+          return res.send({
+            success: true,
+            modifyParcel: result,
+            paymentInfo: resultPayment,
+            trackingId: trackingId,
+            transactionId: session.payment_intent,
+          });
+        }
+
+        // res.send({ success: true });
+
+        // res.send({ success: true, trackingId, transactionId });
+      }
+
+      return res.send({ success: false });
+    });
+
+    app.get("/payment", async (req, res) => {
+      const email = req.query.email;
+      const query = {};
+      if (email) {
+        query.customerEmail = email;
+      }
+      const cursor = await paymentCollection.find(query).toArray();
+      res.send(cursor);
     });
 
     await client.db("admin").command({ ping: 1 });
