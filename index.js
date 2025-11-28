@@ -7,6 +7,33 @@ const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
 app.use(express.json());
 app.use(cors());
+
+const admin = require("firebase-admin");
+
+const serviceAccount = require("./zap-shift-key.json");
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+const verifyFBToken = async (req, res, next) => {
+  const authorization = req.headers.authorization;
+  if (!authorization) {
+    return res.status(401).send({ message: "Unauthorize access" });
+  }
+
+  const token = authorization.split(" ")[1];
+
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    const email = decoded.email;
+    req.decoded_email = email;
+  } catch {
+    return res.status(401).send({ message: "Unauthorize access" });
+  }
+  next();
+};
+
 const stripe = require("stripe")(process.env.STRIPE_SECRET);
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.gs1mqwb.mongodb.net/?appName=Cluster0`;
@@ -33,6 +60,17 @@ async function run() {
     const db = client.db("Practice-zap-shift");
     const parcelCollection = db.collection("parcels2");
     const paymentCollection = db.collection("payment");
+    const userCollection = db.collection("user");
+
+    // users collection
+    app.post("/users", async (req, res) => {
+      const user = req.body;
+      user.createdAt = new Date();
+      user.role = "user";
+
+      const result = await userCollection.insertOne(user);
+      res.send(result);
+    });
 
     app.post("/parcels2", async (req, res) => {
       const parcel = req.body;
@@ -53,7 +91,10 @@ async function run() {
         query.senderEmail = email;
       }
 
-      const result = await parcelCollection.find(query).toArray();
+      const result = await parcelCollection
+        .find(query)
+        .sort({ createdAt: -1 })
+        .toArray();
       res.send(result);
     });
 
@@ -169,13 +210,20 @@ async function run() {
       return res.send({ success: false });
     });
 
-    app.get("/payment", async (req, res) => {
+    app.get("/payment", verifyFBToken, async (req, res) => {
       const email = req.query.email;
+
       const query = {};
       if (email) {
         query.customerEmail = email;
       }
-      const cursor = await paymentCollection.find(query).toArray();
+      if (email !== req.decoded_email) {
+        return res.status(401).send({ message: "Unauthorize access" });
+      }
+      const cursor = await paymentCollection
+        .find(query)
+        .sort({ paidAt: -1 })
+        .toArray();
       res.send(cursor);
     });
 
