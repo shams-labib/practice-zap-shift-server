@@ -33,6 +33,15 @@ const verifyFBToken = async (req, res, next) => {
   }
   next();
 };
+// must be used after verifyFBToken middleware
+const verifyAdmin = async (req, res, next) => {
+  const email = req.decoded_email;
+  const user = await userCollection.findOne({ email });
+  if (!user || user.role !== "admin") {
+    return res.status(403).send({ message: "forbidden access" });
+  }
+  next();
+};
 
 const stripe = require("stripe")(process.env.STRIPE_SECRET);
 
@@ -61,16 +70,106 @@ async function run() {
     const parcelCollection = db.collection("parcels2");
     const paymentCollection = db.collection("payment");
     const userCollection = db.collection("user");
+    const ridersCollection = db.collection("riders");
 
     // users collection
+
+    app.get("/users", verifyFBToken, async (req, res) => {
+      const cursor = await userCollection.find().toArray();
+      res.send(cursor);
+    });
+
+    app.patch(
+      "/users/:id/role",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        const id = req.params.id;
+        const roleInfo = req.body;
+        const query = { _id: new ObjectId(id) };
+        const updateDoc = {
+          $set: {
+            role: roleInfo.role,
+          },
+        };
+        const result = await userCollection.updateOne(query, updateDoc);
+        res.send(result);
+      }
+    );
+
+    // Role setting
+    app.get("/users/:email/role", async (req, res) => {
+      const email = req.params.email;
+      const query = { email };
+      const user = await userCollection.findOne(query);
+      res.send({ role: user?.role || "user" });
+    });
+
     app.post("/users", async (req, res) => {
       const user = req.body;
       user.createdAt = new Date();
       user.role = "user";
 
+      const email = user.email;
+      const userExits = await userCollection.findOne({ email });
+      if (userExits) {
+        return res.send({ message: "User already exits" });
+      }
+
       const result = await userCollection.insertOne(user);
       res.send(result);
     });
+
+    // riders related Api's
+
+    app.post("/riders", async (req, res) => {
+      const rider = req.body;
+      rider.status = "pending";
+      rider.createdAt = new Date();
+
+      const result = await ridersCollection.insertOne(rider);
+      res.send(result);
+    });
+
+    app.get("/riders", async (req, res) => {
+      const query = {};
+      if (req.query.status) {
+        query.status = req.query.status;
+      }
+      const cursor = await ridersCollection.find(query).toArray();
+      res.send(cursor);
+    });
+
+    app.patch("/riders/:id", verifyFBToken, verifyAdmin, async (req, res) => {
+      const status = req.body.status;
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const updateDoc = {
+        $set: {
+          status: status,
+        },
+      };
+
+      const result = await ridersCollection.updateOne(query, updateDoc);
+
+      if (status === "approved") {
+        const email = req.body.email;
+        const userQuery = { email };
+        const updateUser = {
+          $set: {
+            role: "rider",
+          },
+        };
+        const userResult = await userCollection.updateOne(
+          userQuery,
+          updateUser
+        );
+      }
+
+      res.send(result);
+    });
+
+    // Parcels Collection
 
     app.post("/parcels2", async (req, res) => {
       const parcel = req.body;
